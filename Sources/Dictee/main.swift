@@ -7,7 +7,9 @@ import WhisperKit
 // MARK: - Enregistrement micro (16 kHz mono, format attendu par Whisper)
 
 final class Recorder {
-    private let engine = AVAudioEngine()
+    // Moteur recréé à chaque dictée : après une veille ou un changement de micro
+    // (AirPods…), un moteur réutilisé démarre mais ne reçoit plus aucun son
+    private var engine: AVAudioEngine?
     private let lock = NSLock()
     private var samples: [Float] = []
     private let targetFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false)!
@@ -16,12 +18,14 @@ final class Recorder {
 
     func start() throws {
         lock.lock(); samples.removeAll(); lock.unlock()
+        let engine = AVAudioEngine()
+        self.engine = engine
         let input = engine.inputNode
         let inputFormat = input.outputFormat(forBus: 0)
-        guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
+        guard inputFormat.sampleRate > 0, let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
             throw NSError(domain: "Dictee", code: 1, userInfo: [NSLocalizedDescriptionKey: "Format micro non pris en charge"])
         }
-        input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
+        input.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
             guard let self else { return }
             let ratio = self.targetFormat.sampleRate / inputFormat.sampleRate
             let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 1
@@ -46,8 +50,9 @@ final class Recorder {
     }
 
     func stop() -> [Float] {
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
+        engine?.inputNode.removeTap(onBus: 0)
+        engine?.stop()
+        engine = nil
         lock.lock(); defer { lock.unlock() }
         return samples
     }
@@ -185,6 +190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var axTrusted = false
     private var otherKeyDuringHold = false
     private let recorder = Recorder()
+    private var recordStart = Date()
     private let overlay = OverlayPanel()
     private var whisper: WhisperKit?
     private var state: State = .loading("Démarrage…") { didSet { refresh(); updateOverlay() } }
@@ -228,6 +234,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installHotkey()
         // L'autorisation peut être accordée pendant que l'app tourne : on surveille
         Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.checkTrust() }
+        // Au réveil : on repose le raccourci et on remet l'app dans un état propre
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self else { return }
+            log("Réveil de l'ordinateur : remise à zéro")
+            if case .recording = self.state { _ = self.recorder.stop(); self.state = .ready }
+            self.hotkeyDown = false
+            self.installHotkey()
+        }
         Task { await loadModel() }
     }
 
@@ -310,6 +324,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard case .ready = state else { log("Appui ignoré : modèle pas prêt"); return }
         do {
             try recorder.start()
+            recordStart = Date()
             NSSound(named: "Tink")?.play()
             state = .recording
             log("Enregistrement démarré")
@@ -324,6 +339,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let samples = recorder.stop()
         let peak = samples.map(abs).max() ?? 0
         log("Enregistrement arrêté : \(samples.count) échantillons, pic \(peak)")
+        if samples.isEmpty && Date().timeIntervalSince(recordStart) > 0.6 {
+            log("Micro muet : aucun son reçu")
+            state = .error("Micro muet : réessaie (ou vérifie l'entrée son)")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                if case .error = self.state { self.state = .ready }
+            }
+            return
+        }
         if otherKeyDuringHold { log("Annulé : raccourci utilisé avec une autre touche"); state = .ready; return }
         NSSound(named: "Pop")?.play()
         // Moins de 0,3 s : appui accidentel

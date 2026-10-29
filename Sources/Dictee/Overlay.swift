@@ -70,9 +70,12 @@ final class OverlayPanel {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
-        panel.level = .statusBar
+        // Niveau des menus déroulants : au-dessus des fenêtres « toujours devant » de certaines apps
+        panel.level = .popUpMenu
         panel.ignoresMouseEvents = true
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        // Dictée n'est jamais l'app active : sans ça, la bulle peut être masquée d'office
+        panel.hidesOnDeactivate = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         panel.contentView = NSHostingView(rootView: OverlayView(model: model))
     }
 
@@ -85,6 +88,7 @@ final class OverlayPanel {
         let f = screen.visibleFrame
         panel.setFrameOrigin(NSPoint(x: f.midX - size.width / 2, y: f.minY + 20))
         panel.orderFrontRegardless()
+        log("Bulle affichée sur \(screen.localizedName), visible : \(panel.isVisible)")
     }
 
     func hide() {
