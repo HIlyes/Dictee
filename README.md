@@ -35,6 +35,8 @@ Maintiens une touche, parle, relâche : le texte s'écrit là où se trouve ton 
   - **Langue** : français, ou détection automatique pour dicter dans d'autres langues ;
   - **Lancer au démarrage**.
 
+> Si tu choisis la touche 🌐 Fn, règle **Réglages Système → Clavier → « Appuyer sur la touche 🌐 pour »** sur **Ne rien faire**.
+
 ## Mises à jour
 
 Dictée vérifie une fois par jour s'il existe une nouvelle version sur cette page GitHub. Seul le numéro de la dernière version est demandé : rien d'autre n'est envoyé.
@@ -43,8 +45,6 @@ Quand une mise à jour est disponible, le menu 🎤 affiche **« ⬆️ Mise à 
 1. quitte Dictée (menu 🎤 → Quitter) ;
 2. remplace l'ancienne `Dictee.app` dans Applications par celle du nouveau zip ;
 3. relance-la. Si la dictée n'écrit plus rien, réactive Dictee dans **Accessibilité** (voir Dépannage).
-
-> Si tu choisis la touche 🌐 Fn, règle **Réglages Système → Clavier → « Appuyer sur la touche 🌐 pour »** sur **Ne rien faire**.
 
 ## Dépannage
 
