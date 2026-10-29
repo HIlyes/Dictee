@@ -190,6 +190,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var axTrusted = false
     private var otherKeyDuringHold = false
     private let recorder = Recorder()
+    private let updater = Updater()
+    private let updateItem = NSMenuItem(title: "Rechercher des mises à jour", action: #selector(updateClicked), keyEquivalent: "")
+    private var availableUpdate: Updater.Release?
     private var recordStart = Date()
     private let overlay = OverlayPanel()
     private var whisper: WhisperKit?
@@ -222,6 +225,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let hotkeyItem = NSMenuItem(title: "Raccourci", action: nil, keyEquivalent: "")
         hotkeyItem.submenu = hotkeyMenu
         menu.addItem(hotkeyItem)
+        updateItem.target = self
+        menu.addItem(updateItem)
         loginItem.target = self
         menu.addItem(loginItem)
         menu.addItem(.separator())
@@ -234,6 +239,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installHotkey()
         // L'autorisation peut être accordée pendant que l'app tourne : on surveille
         Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.checkTrust() }
+        updater.onResult = { [weak self] release in
+            guard let self else { return }
+            self.availableUpdate = release
+            self.updateItem.title = release.map { "⬆️ Mise à jour disponible (\($0.version))" }
+                ?? "✅ Dictée est à jour (\(self.updater.currentVersion))"
+        }
+        updater.start()
         // Au réveil : on repose le raccourci et on remet l'app dans un état propre
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
@@ -406,6 +418,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         autoLanguage.toggle()
         UserDefaults.standard.set(autoLanguage, forKey: "autoLanguage")
         refresh()
+    }
+
+    @objc private func updateClicked() {
+        if let release = availableUpdate {
+            NSWorkspace.shared.open(release.page)
+        } else {
+            updateItem.title = "Recherche en cours…"
+            updater.check()
+        }
     }
 
     @objc private func chooseHotkey(_ sender: NSMenuItem) {
