@@ -61,11 +61,13 @@ struct OverlayView: View {
 
 final class OverlayPanel {
     let model = OverlayModel()
-    private let panel: NSPanel
+    private var panel: NSPanel?
     private let size = NSSize(width: 260, height: 56)
 
-    init() {
-        panel = NSPanel(contentRect: NSRect(origin: .zero, size: size),
+    /// Une fenêtre neuve à chaque dictée : une fenêtre gardée longtemps peut rester accrochée
+    /// à un ancien bureau et ne plus apparaître sur une app en plein écran
+    private func makePanel() -> NSPanel {
+        let panel = NSPanel(contentRect: NSRect(origin: .zero, size: size),
                         styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
         panel.isOpaque = false
         panel.backgroundColor = .clear
@@ -77,11 +79,17 @@ final class OverlayPanel {
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         panel.contentView = NSHostingView(rootView: OverlayView(model: model))
+        return panel
     }
 
     func show(_ mode: OverlayModel.Mode) {
         if mode == .listening { model.levels = model.levels.map { _ in 0 } }
         model.mode = mode
+        if mode == .listening || panel == nil {
+            panel?.orderOut(nil)
+            panel = makePanel()
+        }
+        guard let panel else { return }
         // Sur l'écran où se trouve la souris
         let mouse = NSEvent.mouseLocation
         guard let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main else { return }
@@ -92,6 +100,6 @@ final class OverlayPanel {
     }
 
     func hide() {
-        panel.orderOut(nil)
+        panel?.orderOut(nil)
     }
 }
