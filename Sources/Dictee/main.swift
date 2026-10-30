@@ -94,6 +94,51 @@ enum Paster {
     }
 }
 
+// MARK: - Contexte du curseur : début de phrase ou pas ?
+
+enum CursorContext {
+    /// Le texte juste avant le curseur dans le champ actif, si l'app le donne (nil sinon)
+    static func textBeforeCursor() -> String? {
+        let system = AXUIElementCreateSystemWide()
+        var focused: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+              let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { return nil }
+        let element = focused as! AXUIElement
+        var value: CFTypeRef?
+        var range: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value) == .success,
+              let text = value as? String,
+              AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &range) == .success,
+              let range, CFGetTypeID(range) == AXValueGetTypeID() else { return nil }
+        var r = CFRange()
+        guard AXValueGetValue(range as! AXValue, .cfRange, &r) else { return nil }
+        let ns = text as NSString
+        let end = max(0, min(r.location, ns.length))
+        let start = max(0, end - 200)
+        return ns.substring(with: NSRange(location: start, length: end - start))
+    }
+
+    /// Ajuste le début de la dictée à ce qui précède : minuscule en milieu de phrase, espace si collé à un mot
+    static func adapt(_ text: String, after before: String?) -> String {
+        guard let before, !before.isEmpty, let first = text.first else { return text }
+        var t = text
+        let trimmed = before.trimmingCharacters(in: .whitespaces.union(CharacterSet(charactersIn: "\u{00A0}")))
+        let sentenceStart = trimmed.isEmpty || before.last?.isNewline == true
+            || ".!?…:".contains(trimmed.last!)
+        if !sentenceStart, first.isUppercase {
+            // Seulement un mot ordinaire (« Je », « Bonjour ») : on garde « API », « iPhone » ou « I »
+            let word = t.prefix { $0.isLetter }
+            if word.count > 1, word.dropFirst().allSatisfy(\.isLowercase) {
+                t = first.lowercased() + t.dropFirst()
+            }
+        }
+        if let last = before.last, !last.isWhitespace, !"(«[{'’\"-/".contains(last), t.first?.isLetter == true || t.first?.isNumber == true {
+            t = " " + t
+        }
+        return t
+    }
+}
+
 // MARK: - Typographie française (espace insécable avant ? ! ; :)
 
 enum FrenchTypography {
@@ -179,9 +224,18 @@ enum Stats {
 
 // MARK: - Journal de diagnostic (~/Library/Logs/Dictee.log)
 
+private let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Dictee.log")
+private let logDate = ISO8601DateFormatter()
+
 func log(_ message: String) {
-    let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Dictee.log")
-    let line = "\(ISO8601DateFormatter().string(from: Date())) \(message)\n"
+    let url = logURL
+    let line = "\(logDate.string(from: Date())) \(message)\n"
+    // Au-delà de 1 Mo, l'ancien journal devient Dictee.old.log : il ne grossit jamais sans fin
+    if let size = try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int, size > 1_000_000 {
+        let old = url.deletingPathExtension().appendingPathExtension("old.log")
+        try? FileManager.default.removeItem(at: old)
+        try? FileManager.default.moveItem(at: url, to: old)
+    }
     if let handle = try? FileHandle(forWritingTo: url) {
         handle.seekToEndOfFile()
         handle.write(Data(line.utf8))
@@ -243,7 +297,7 @@ enum Hotkey: String, CaseIterable {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     enum State { case loading(String), ready, recording, transcribing, error(String) }
 
-    // Une touche Option (gauche 58 ou droite 61) maintenue seule = on parle
+    /// La touche modificatrice à maintenir pour parler (choisie dans les réglages)
     private var hotkey = Hotkey(rawValue: UserDefaults.standard.string(forKey: "hotkey") ?? "") ?? .option
 
     private var statusItem: NSStatusItem!
@@ -255,7 +309,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let recorder = Recorder()
     private let updater = Updater()
     private var availableUpdate: Updater.Release?
-    /// Vrai quand l'utilisateur a cliqué : on affiche alors le résultat dans une fenêtre
+    /// Vrai quand l'utilisateur a cliqué : le panneau affiche alors le résultat
     private var manualUpdateCheck = false
     private var recordStart = Date()
     private let overlay = OverlayPanel()
@@ -298,6 +352,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updater.onResult = { [weak self] release in
             guard let self else { return }
             self.availableUpdate = release
+            self.refresh()
             self.menuModel.updateVersion = release?.version
             let manual = self.manualUpdateCheck
             self.manualUpdateCheck = false
@@ -334,6 +389,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func checkTrust() {
         let trusted = AXIsProcessTrusted()
+        let mic = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        guard trusted != axTrusted || mic != menuModel.micOK else { return }
         if trusted != axTrusted {
             axTrusted = trusted
             log("Accessibilité : \(trusted ? "autorisée" : "NON autorisée")")
@@ -519,7 +576,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 log("Transcription : \(text.count) caractères")
                 await MainActor.run {
                     guard id == transcriptionID else { log("Transcription ignorée (annulée)"); return }
-                    if !text.isEmpty { Stats.record(text, seconds: seconds) }
+                    let before = CursorContext.textBeforeCursor()
+                    let text = CursorContext.adapt(text, after: before)
+                    log("Contexte du curseur : \(before.map { "« …\(String($0.suffix(20)))»" } ?? "illisible")")
+                    if !text.isEmpty { Stats.record(text, seconds: seconds); refreshPanel() }
                     if !text.isEmpty && !Paster.paste(text) {
                         state = .error("Texte copié : fais ⌘V (accessibilité à autoriser)")
                         NSSound(named: "Funk")?.play()
@@ -549,7 +609,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             state = .error("Démarrage auto : \(error.localizedDescription)")
         }
-        refresh()
+        refreshPanel()
     }
 
     @objc private func toggleLanguage() {
@@ -575,6 +635,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             menuModel.page = .home
             refresh()
+            refreshPanel()
             NSApp.activate(ignoringOtherApps: true)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         }
@@ -588,13 +649,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refresh()
     }
 
-    private func refresh() {
+    /// Données du panneau (historique, stats, démarrage auto) : à l'ouverture et après chaque dictée
+    private func refreshPanel() {
         let m = menuModel
-        m.hotkey = hotkey
-        m.autoLanguage = autoLanguage
         m.launchAtLogin = SMAppService.mainApp.status == .enabled
-        m.axOK = axTrusted
-        m.micOK = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
         let dates = Stats.historyDates
         m.history = Stats.history.enumerated().map { i, text in
             MenuModel.Entry(text: text, date: i < dates.count ? Date(timeIntervalSince1970: dates[i]) : nil)
@@ -603,6 +661,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         m.totalWords = Stats.totalWords
         m.minutesSaved = Stats.minutesSaved
         m.week = Stats.lastWeek.map { MenuModel.Day(date: $0.date, words: $0.words) }
+    }
+
+    /// État courant : icône de la barre de menu et en-tête du panneau
+    private func refresh() {
+        let m = menuModel
+        m.hotkey = hotkey
+        m.autoLanguage = autoLanguage
+        m.axOK = axTrusted
+        m.micOK = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
         m.status = {
             switch state {
             case .loading(let msg): return .loading(msg)
@@ -622,7 +689,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .error(let msg): return ("exclamationmark.triangle.fill", .systemOrange, msg)
             }
         }()
-        statusItem?.button?.toolTip = "Dictée : \(text)"
+        statusItem?.button?.toolTip = availableUpdate.map { "Dictée : mise à jour \($0.version) disponible" } ?? "Dictée : \(text)"
         var image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Dictée")
         if let color {
             image = image?.withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [color]))
@@ -630,7 +697,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             image?.isTemplate = true
         }
+        // Pastille corail sur l'icône quand une mise à jour attend
+        if availableUpdate != nil, case .ready = state, let base = image {
+            image = withBadge(base)
+        }
         statusItem?.button?.image = image
+    }
+
+    private func withBadge(_ base: NSImage) -> NSImage {
+        let size = NSSize(width: base.size.width + 3, height: base.size.height)
+        // Dessiné au moment de l'affichage : la couleur suit le thème clair/sombre de la barre de menu
+        return NSImage(size: size, flipped: false) { rect in
+            let icon = NSRect(origin: .zero, size: base.size)
+            base.draw(in: icon)
+            NSColor.labelColor.set()
+            icon.fill(using: .sourceAtop)
+            let dot = NSRect(x: rect.maxX - 7, y: rect.maxY - 7, width: 7, height: 7)
+            // Liseré transparent autour de la pastille, pour la détacher du micro
+            NSGraphicsContext.current?.compositingOperation = .clear
+            NSBezierPath(ovalIn: dot.insetBy(dx: -1.5, dy: -1.5)).fill()
+            NSGraphicsContext.current?.compositingOperation = .sourceOver
+            Brand.coral.setFill()
+            NSBezierPath(ovalIn: dot).fill()
+            return true
+        }
     }
 
     private func updateOverlay() {

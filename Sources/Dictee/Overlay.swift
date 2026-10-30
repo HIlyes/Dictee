@@ -137,7 +137,7 @@ final class OverlayPanel {
         let f = screen.visibleFrame
         panel.setFrameOrigin(NSPoint(x: f.midX - size.width / 2, y: f.minY + 20))
         panel.orderFrontRegardless()
-        log("Bulle affichée sur \(screen.localizedName), visible : \(panel.isVisible)")
+        if mode == .listening { log("Bulle affichée sur \(screen.localizedName), visible : \(panel.isVisible)") }
     }
 
     /// Affiche brièvement ✓ ou ✕, puis cache la bulle
