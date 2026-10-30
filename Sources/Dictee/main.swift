@@ -109,6 +109,74 @@ enum FrenchTypography {
     }
 }
 
+// MARK: - Nettoyage des tics de langage (euh, hum, mots répétés)
+
+enum TextCleanup {
+    static func apply(_ text: String) -> String {
+        var t = text
+        // « euh », « heu », « hum », « hmm », « um », « uh », avec la virgule ou les points qui suivent
+        t = t.replacingOccurrences(of: #"(?i),?\s*\b(e+u+h+|h+e+u+|h+u+m+|h+m+|u+m+|u+h+)\b[,.…]*"#, with: " ", options: .regularExpression)
+        // Mot répété (« je je ») sauf « nous nous », « vous vous » et « très très », voulus
+        t = t.replacingOccurrences(of: #"(?i)\b(?!nous\b|vous\b|très\b)(\p{L}+)(?:\s+\1\b)+"#, with: "$1", options: .regularExpression)
+        t = t.replacingOccurrences(of: #"\s{2,}"#, with: " ", options: .regularExpression)
+        t = t.replacingOccurrences(of: #"\s+([,.])"#, with: "$1", options: .regularExpression)
+        t = t.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: ",")))
+        // Majuscule en tête si on a retiré le premier mot
+        if let first = t.first, first.isLowercase, text.first?.isUppercase == true {
+            t = first.uppercased() + t.dropFirst()
+        }
+        return t
+    }
+}
+
+// MARK: - Historique et statistiques (UserDefaults)
+
+enum Stats {
+    private static let d = UserDefaults.standard
+
+    static var history: [String] { d.stringArray(forKey: "history") ?? [] }
+    /// Date de chaque dictée de l'historique (secondes depuis 1970), dans le même ordre
+    static var historyDates: [Double] { d.array(forKey: "historyDates") as? [Double] ?? [] }
+    static var totalWords: Int { d.integer(forKey: "totalWords") }
+    static var todayWords: Int { d.string(forKey: "todayDate") == today ? d.integer(forKey: "todayWords") : 0 }
+    /// Temps gagné par rapport à une frappe à 40 mots/min, en minutes
+    static var minutesSaved: Int { max(0, Int(Double(totalWords) / 40 - d.double(forKey: "totalSeconds") / 60)) }
+
+    private static func day(_ date: Date) -> String {
+        ISO8601DateFormatter.string(from: date, timeZone: .current, formatOptions: .withFullDate)
+    }
+    private static var today: String { day(Date()) }
+
+    /// Mots dictés par jour (« 2026-10-31 » -> 412)
+    private static var daily: [String: Int] { d.dictionary(forKey: "dailyWords") as? [String: Int] ?? [:] }
+
+    /// Les 7 derniers jours, du plus ancien à aujourd'hui
+    static var lastWeek: [(date: Date, words: Int)] {
+        var days = daily
+        // Les mots d'aujourd'hui comptés avant l'arrivée du suivi par jour
+        if days[today] == nil, todayWords > 0 { days[today] = todayWords }
+        return (0..<7).reversed().map { offset in
+            let date = Calendar.current.date(byAdding: .day, value: -offset, to: Date())!
+            return (date, days[day(date)] ?? 0)
+        }
+    }
+
+    static func record(_ text: String, seconds: Double) {
+        let words = text.split(whereSeparator: { $0.isWhitespace }).count
+        d.set(Array(([text] + history).prefix(50)), forKey: "history")
+        d.set(Array(([Date().timeIntervalSince1970] + historyDates).prefix(50)), forKey: "historyDates")
+        var days = daily
+        days[today] = todayWords + words
+        // On ne garde qu'un mois
+        let cutoff = day(Date().addingTimeInterval(-31 * 86_400))
+        d.set(days.filter { $0.key >= cutoff }, forKey: "dailyWords")
+        d.set(totalWords + words, forKey: "totalWords")
+        d.set(todayWords + words, forKey: "todayWords")
+        d.set(today, forKey: "todayDate")
+        d.set(d.double(forKey: "totalSeconds") + seconds, forKey: "totalSeconds")
+    }
+}
+
 // MARK: - Journal de diagnostic (~/Library/Logs/Dictee.log)
 
 func log(_ message: String) {
@@ -177,21 +245,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // Une touche Option (gauche 58 ou droite 61) maintenue seule = on parle
     private var hotkey = Hotkey(rawValue: UserDefaults.standard.string(forKey: "hotkey") ?? "") ?? .option
-    private let hintLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-    private let hotkeyMenu = NSMenu()
 
     private var statusItem: NSStatusItem!
-    private let statusLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-    private let langItem = NSMenuItem(title: "Langue : français", action: #selector(toggleLanguage), keyEquivalent: "")
-    private let loginItem = NSMenuItem(title: "Lancer au démarrage", action: #selector(toggleLogin), keyEquivalent: "")
-    private let axLine = NSMenuItem(title: "", action: #selector(openAccessibility), keyEquivalent: "")
-    private let micLine = NSMenuItem(title: "", action: #selector(openMicrophone), keyEquivalent: "")
+    private let popover = NSPopover()
+    private let menuModel = MenuModel()
     private var monitors: [Any] = []
     private var axTrusted = false
     private var otherKeyDuringHold = false
     private let recorder = Recorder()
     private let updater = Updater()
-    private let updateItem = NSMenuItem(title: "Rechercher des mises à jour", action: #selector(updateClicked), keyEquivalent: "")
     private var availableUpdate: Updater.Release?
     /// Vrai quand l'utilisateur a cliqué : on affiche alors le résultat dans une fenêtre
     private var manualUpdateCheck = false
@@ -200,40 +262,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var whisper: WhisperKit?
     private var state: State = .loading("Démarrage…") { didSet { refresh(); updateOverlay() } }
     private var hotkeyDown = false
+    /// Mains libres : activé par un double appui, arrêté par l'appui suivant
+    private var handsFree = false
+    private var pressStart = Date()
+    private var lastQuickRelease: Date?
+    private var ignoreNextRelease = false
+    /// Incrémenté par Échap : la transcription en cours n'est plus collée
+    private var transcriptionID = 0
     private var autoLanguage = UserDefaults.standard.bool(forKey: "autoLanguage")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         recorder.onLevel = { [weak self] rms in self?.overlay.model.push(rms) }
-        let menu = NSMenu()
-        statusLine.isEnabled = false
-        menu.addItem(statusLine)
-        hintLine.isEnabled = false
-        menu.addItem(hintLine)
-        menu.addItem(.separator())
-        axLine.target = self
-        menu.addItem(axLine)
-        micLine.target = self
-        menu.addItem(micLine)
-        menu.addItem(.separator())
-        langItem.target = self
-        menu.addItem(langItem)
-        for key in Hotkey.allCases {
-            let item = NSMenuItem(title: key.label, action: #selector(chooseHotkey(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = key.rawValue
-            hotkeyMenu.addItem(item)
-        }
-        let hotkeyItem = NSMenuItem(title: "Raccourci", action: nil, keyEquivalent: "")
-        hotkeyItem.submenu = hotkeyMenu
-        menu.addItem(hotkeyItem)
-        updateItem.target = self
-        menu.addItem(updateItem)
-        loginItem.target = self
-        menu.addItem(loginItem)
-        menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Quitter Dictée", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
-        statusItem.menu = menu
+        statusItem.button?.target = self
+        statusItem.button?.action = #selector(togglePopover)
+        popover.behavior = .transient
+        let host = NSHostingController(rootView: MenuView(model: menuModel))
+        // Le panneau suit la taille de la page affichée (accueil, historique, réglages)
+        host.sizingOptions = .preferredContentSize
+        popover.contentViewController = host
+        menuModel.version = updater.currentVersion
+        menuModel.chooseHotkey = { [weak self] in self?.setHotkey($0) }
+        menuModel.toggleLanguage = { [weak self] in self?.toggleLanguage() }
+        menuModel.toggleLogin = { [weak self] in self?.toggleLogin() }
+        menuModel.update = { [weak self] in self?.updateClicked() }
+        menuModel.openAccessibility = { [weak self] in self?.openAccessibility() }
+        menuModel.openMicrophone = { [weak self] in self?.openMicrophone() }
         refresh()
 
         log("Lancement \(Bundle.main.bundlePath)")
@@ -244,23 +298,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updater.onResult = { [weak self] release in
             guard let self else { return }
             self.availableUpdate = release
-            self.updateItem.title = release.map { "⬆️ Mise à jour disponible (\($0.version))" }
-                ?? "✅ Dictée est à jour (\(self.updater.currentVersion))"
-            if self.manualUpdateCheck {
-                self.manualUpdateCheck = false
+            self.menuModel.updateVersion = release?.version
+            let manual = self.manualUpdateCheck
+            self.manualUpdateCheck = false
+            // On laisse « Vérification… » visible un instant, sinon le clic semble sans effet
+            DispatchQueue.main.asyncAfter(deadline: .now() + (manual ? 0.7 : 0)) {
+                self.menuModel.checking = false
+                self.menuModel.checkFailed = false
+                guard manual else { return }
                 if let release {
                     NSWorkspace.shared.open(release.page)
                 } else {
-                    self.showAlert("Dictée est à jour",
-                                   "Tu as la dernière version (\(self.updater.currentVersion)). Il n'y a rien à faire.")
+                    self.menuModel.confirmedUpToDate = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 4) { self.menuModel.confirmedUpToDate = false }
                 }
             }
         }
         updater.onError = { [weak self] in
-            guard let self, self.manualUpdateCheck else { return }
+            guard let self else { return }
+            self.menuModel.checking = false
+            self.menuModel.checkFailed = self.manualUpdateCheck
             self.manualUpdateCheck = false
-            self.updateItem.title = "Rechercher des mises à jour"
-            self.showAlert("Vérification impossible", "Impossible de joindre GitHub. Vérifie ta connexion internet et réessaie.")
         }
         updater.start()
         // Au réveil : on repose le raccourci et on remet l'app dans un état propre
@@ -328,25 +386,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let handler: (NSEvent) -> Void = { [weak self] event in
             guard let self else { return }
             if event.type == .keyDown {
+                // Échap : on annule la dictée ou la transcription en cours
+                if event.keyCode == 53 { self.cancelDictation(); return }
                 // Raccourci + une touche (ex. ⌥( pour « { » ou ⌘C) : ce n'est pas une dictée
-                if self.hotkeyDown { self.otherKeyDuringHold = true }
+                if self.hotkeyDown && !self.handsFree { self.otherKeyDuringHold = true }
                 return
             }
-            log("Touche modificatrice keyCode=\(event.keyCode)")
             guard self.hotkey.keyCodes.contains(event.keyCode) else { return }
             let pressed = event.modifierFlags.contains(self.hotkey.flag)
             if pressed && !self.hotkeyDown {
                 self.hotkeyDown = true
-                self.otherKeyDuringHold = false
-                self.startRecording()
+                self.keyPressed()
             } else if !pressed && self.hotkeyDown {
                 self.hotkeyDown = false
-                self.stopRecording()
+                self.keyReleased()
             }
         }
         if let m = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged, .keyDown], handler: handler) { monitors.append(m) }
         if let m = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .keyDown], handler: { handler($0); return $0 }) { monitors.append(m) }
         log("Raccourci installé (accessibilité : \(AXIsProcessTrusted()))")
+    }
+
+    private func keyPressed() {
+        pressStart = Date()
+        if handsFree {
+            // Mains libres : l'appui suivant termine la dictée
+            handsFree = false
+            ignoreNextRelease = true
+            stopRecording()
+        } else if case .recording = state, let last = lastQuickRelease, Date().timeIntervalSince(last) < 0.4 {
+            // Double appui : on passe en mains libres, l'enregistrement continue
+            lastQuickRelease = nil
+            handsFree = true
+            ignoreNextRelease = true
+            overlay.model.locked = true
+            refresh()
+            log("Mains libres activé")
+        } else {
+            otherKeyDuringHold = false
+            startRecording()
+        }
+    }
+
+    private func keyReleased() {
+        if ignoreNextRelease { ignoreNextRelease = false; return }
+        guard case .recording = state else { return }
+        if Date().timeIntervalSince(pressStart) < 0.3 && !otherKeyDuringHold {
+            // Appui bref : peut-être le début d'un double appui, on attend un peu avant d'abandonner
+            let release = Date()
+            lastQuickRelease = release
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                guard self.lastQuickRelease == release, !self.handsFree, !self.hotkeyDown else { return }
+                self.lastQuickRelease = nil
+                self.stopRecording()
+            }
+            return
+        }
+        stopRecording()
+    }
+
+    private func cancelDictation() {
+        switch state {
+        case .recording:
+            _ = recorder.stop()
+            handsFree = false
+            lastQuickRelease = nil
+            if hotkeyDown { ignoreNextRelease = true }
+        case .transcribing:
+            transcriptionID += 1
+        default:
+            return
+        }
+        log("Annulé avec Échap")
+        state = .ready
+        overlay.flash(.cancelled)
     }
 
     private func startRecording() {
@@ -377,6 +490,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         if otherKeyDuringHold { log("Annulé : raccourci utilisé avec une autre touche"); state = .ready; return }
+        handsFree = false
         NSSound(named: "Pop")?.play()
         // Moins de 0,3 s : appui accidentel
         guard samples.count > 16_000 * 3 / 10, let whisper else { state = .ready; return }
@@ -392,14 +506,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             chunkingStrategy: .vad
         )
         let french = !autoLanguage
+        let seconds = Double(samples.count) / 16_000
+        transcriptionID += 1
+        let id = transcriptionID
         Task {
             do {
                 let results: [TranscriptionResult] = try await whisper.transcribe(audioArray: samples, decodeOptions: options)
                 let raw = results.map(\.text).joined(separator: " ")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
-                let text = french ? FrenchTypography.apply(raw) : raw
+                let cleaned = TextCleanup.apply(raw)
+                let text = french ? FrenchTypography.apply(cleaned) : cleaned
                 log("Transcription : \(text.count) caractères")
                 await MainActor.run {
+                    guard id == transcriptionID else { log("Transcription ignorée (annulée)"); return }
+                    if !text.isEmpty { Stats.record(text, seconds: seconds) }
                     if !text.isEmpty && !Paster.paste(text) {
                         state = .error("Texte copié : fais ⌘V (accessibilité à autoriser)")
                         NSSound(named: "Funk")?.play()
@@ -409,6 +529,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         return
                     }
                     state = .ready
+                    if !text.isEmpty { overlay.flash(.done) }
                 }
             } catch {
                 await MainActor.run { state = .error("Transcription : \(error.localizedDescription)") }
@@ -441,50 +562,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let release = availableUpdate {
             NSWorkspace.shared.open(release.page)
         } else {
-            updateItem.title = "Recherche en cours…"
+            menuModel.checking = true
             manualUpdateCheck = true
             updater.check()
         }
     }
 
-    private func showAlert(_ title: String, _ text: String) {
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = text
-        NSApp.activate(ignoringOtherApps: true)
-        alert.runModal()
+    @objc private func togglePopover() {
+        guard let button = statusItem.button else { return }
+        if popover.isShown {
+            popover.performClose(nil)
+        } else {
+            menuModel.page = .home
+            refresh()
+            NSApp.activate(ignoringOtherApps: true)
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        }
     }
 
-    @objc private func chooseHotkey(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String, let key = Hotkey(rawValue: raw) else { return }
+    private func setHotkey(_ key: Hotkey) {
         hotkey = key
         hotkeyDown = false
-        UserDefaults.standard.set(raw, forKey: "hotkey")
-        log("Raccourci choisi : \(raw)")
+        UserDefaults.standard.set(key.rawValue, forKey: "hotkey")
+        log("Raccourci choisi : \(key.rawValue)")
         refresh()
     }
 
     private func refresh() {
-        hintLine.title = "Maintenir \(hotkey.label) pour dicter"
-        for item in hotkeyMenu.items {
-            item.state = item.representedObject as? String == hotkey.rawValue ? .on : .off
+        let m = menuModel
+        m.hotkey = hotkey
+        m.autoLanguage = autoLanguage
+        m.launchAtLogin = SMAppService.mainApp.status == .enabled
+        m.axOK = axTrusted
+        m.micOK = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        let dates = Stats.historyDates
+        m.history = Stats.history.enumerated().map { i, text in
+            MenuModel.Entry(text: text, date: i < dates.count ? Date(timeIntervalSince1970: dates[i]) : nil)
         }
-        langItem.title = autoLanguage ? "Langue : détection auto" : "Langue : français"
-        loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
-        axLine.title = axTrusted ? "✅ Accessibilité autorisée" : "⚠️ Accessibilité à autoriser (clic)"
-        let mic = AVCaptureDevice.authorizationStatus(for: .audio)
-        micLine.title = mic == .authorized ? "✅ Micro autorisé" : "⚠️ Micro à autoriser (clic)"
+        m.todayWords = Stats.todayWords
+        m.totalWords = Stats.totalWords
+        m.minutesSaved = Stats.minutesSaved
+        m.week = Stats.lastWeek.map { MenuModel.Day(date: $0.date, words: $0.words) }
+        m.status = {
+            switch state {
+            case .loading(let msg): return .loading(msg)
+            case .ready: return .ready
+            case .recording: return .recording(handsFree: handsFree)
+            case .transcribing: return .transcribing
+            case .error(let msg): return .error(msg)
+            }
+        }()
         // Couleur nil = icône monochrome qui suit le thème de la barre de menu
         let (symbol, color, text): (String, NSColor?, String) = {
             switch state {
             case .loading(let msg): return ("hourglass", nil, msg)
             case .ready: return ("mic", nil, "Prêt")
-            case .recording: return ("mic.fill", Brand.coral, "J'écoute…")
+            case .recording: return ("mic.fill", Brand.coral, handsFree ? "J'écoute (mains libres, Échap pour annuler)…" : "J'écoute…")
             case .transcribing: return ("waveform", Brand.violet, "Transcription…")
             case .error(let msg): return ("exclamationmark.triangle.fill", .systemOrange, msg)
             }
         }()
-        statusLine.title = text
+        statusItem?.button?.toolTip = "Dictée : \(text)"
         var image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Dictée")
         if let color {
             image = image?.withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [color]))
@@ -542,6 +680,39 @@ if CommandLine.arguments.contains("--preview") {
             if let cg = renderer.cgImage {
                 let png = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])
                 try? png?.write(to: URL(fileURLWithPath: CommandLine.arguments[i + 1] + "-\(mode).png"))
+            }
+        }
+        // Le panneau du menu, avec des données d'exemple
+        let menu = MenuModel()
+        menu.status = .ready
+        menu.hotkey = .fn
+        menu.version = "0.7"
+        menu.todayWords = 412
+        menu.totalWords = 5_280
+        menu.minutesSaved = 96
+        menu.history = [
+            .init(text: "Tu peux me dire pourquoi la bulle n'apparaît pas en plein écran ?", date: Date().addingTimeInterval(-40)),
+            .init(text: "Ok, je regarde ça demain matin et je te redis.", date: Date().addingTimeInterval(-60 * 14)),
+            .init(text: "Merci pour le retour !", date: Date().addingTimeInterval(-3600 * 3)),
+        ]
+        menu.week = [120, 340, 0, 280, 510, 190, 412].enumerated().map {
+            MenuModel.Day(date: Date().addingTimeInterval(Double($0.offset - 6) * 86_400), words: $0.element)
+        }
+        for (page, dark, suffix) in [(MenuModel.Page.home, false, "light"), (.home, true, "dark"),
+                                     (.settings, false, "settings"), (.history, true, "history")] {
+            menu.page = page
+            let host = NSHostingView(rootView: MenuView(model: menu))
+            host.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+            host.sizingOptions = [.intrinsicContentSize]
+            host.frame.size = host.fittingSize
+            let bg = NSView(frame: host.frame)
+            bg.wantsLayer = true
+            bg.layer?.backgroundColor = (dark ? NSColor(white: 0.16, alpha: 1) : NSColor(white: 0.93, alpha: 1)).cgColor
+            bg.addSubview(host)
+            if let rep = bg.bitmapImageRepForCachingDisplay(in: bg.bounds) {
+                bg.cacheDisplay(in: bg.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?
+                    .write(to: URL(fileURLWithPath: CommandLine.arguments[i + 1] + "-menu-\(suffix).png"))
             }
         }
         }

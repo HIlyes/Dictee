@@ -30,7 +30,12 @@ Maintiens une touche, parle, relâche : le texte s'écrit là où se trouve ton 
 
 - Clique dans un champ texte, **maintiens ⌥ Option**, parle, puis relâche.
 - Une bulle apparaît en bas de l'écran pendant que tu parles, puis le texte est collé.
-- Dans le menu 🎤 :
+- **Mains libres** : appuie deux fois rapidement sur la touche, parle sans la tenir, puis appuie une fois pour terminer.
+- **Échap** annule la dictée en cours : rien n'est collé.
+- Les « euh », « hum » et mots répétés (« je je ») sont retirés automatiquement.
+- Clique sur l'icône 🎤 de la barre de menu pour ouvrir le panneau :
+  - tes **statistiques** : mots dictés aujourd'hui, au total, et temps gagné ;
+  - **Historique** : tes 10 dernières dictées, un clic recopie le texte ;
   - **Raccourci** : choisis ta touche (Option, Commande droite, Contrôle, Fn…) ;
   - **Langue** : français, ou détection automatique pour dicter dans d'autres langues ;
   - **Lancer au démarrage**.
