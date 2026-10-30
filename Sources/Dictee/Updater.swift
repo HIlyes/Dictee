@@ -9,6 +9,8 @@ final class Updater {
     let currentVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
     /// Appelé sur le fil principal : la release si elle est plus récente, nil si l'app est à jour
     var onResult: ((Release?) -> Void)?
+    /// Appelé sur le fil principal quand GitHub ne répond pas
+    var onError: (() -> Void)?
 
     /// Vérifie maintenant, puis une fois par jour
     func start() {
@@ -26,6 +28,7 @@ final class Updater {
                   let tag = json["tag_name"] as? String,
                   let page = (json["html_url"] as? String).flatMap(URL.init(string:)) else {
                 log("Mise à jour : vérification impossible (\(error?.localizedDescription ?? "réponse inattendue"))")
+                DispatchQueue.main.async { self.onError?() }
                 return
             }
             let latest = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag

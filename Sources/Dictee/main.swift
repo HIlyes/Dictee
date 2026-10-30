@@ -193,6 +193,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let updater = Updater()
     private let updateItem = NSMenuItem(title: "Rechercher des mises à jour", action: #selector(updateClicked), keyEquivalent: "")
     private var availableUpdate: Updater.Release?
+    /// Vrai quand l'utilisateur a cliqué : on affiche alors le résultat dans une fenêtre
+    private var manualUpdateCheck = false
     private var recordStart = Date()
     private let overlay = OverlayPanel()
     private var whisper: WhisperKit?
@@ -244,6 +246,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.availableUpdate = release
             self.updateItem.title = release.map { "⬆️ Mise à jour disponible (\($0.version))" }
                 ?? "✅ Dictée est à jour (\(self.updater.currentVersion))"
+            if self.manualUpdateCheck {
+                self.manualUpdateCheck = false
+                if let release {
+                    NSWorkspace.shared.open(release.page)
+                } else {
+                    self.showAlert("Dictée est à jour",
+                                   "Tu as la dernière version (\(self.updater.currentVersion)). Il n'y a rien à faire.")
+                }
+            }
+        }
+        updater.onError = { [weak self] in
+            guard let self, self.manualUpdateCheck else { return }
+            self.manualUpdateCheck = false
+            self.updateItem.title = "Rechercher des mises à jour"
+            self.showAlert("Vérification impossible", "Impossible de joindre GitHub. Vérifie ta connexion internet et réessaie.")
         }
         updater.start()
         // Au réveil : on repose le raccourci et on remet l'app dans un état propre
@@ -425,8 +442,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSWorkspace.shared.open(release.page)
         } else {
             updateItem.title = "Recherche en cours…"
+            manualUpdateCheck = true
             updater.check()
         }
+    }
+
+    private func showAlert(_ title: String, _ text: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = text
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
 
     @objc private func chooseHotkey(_ sender: NSMenuItem) {
