@@ -90,7 +90,6 @@ struct MenuView: View {
 
     @ViewBuilder private var home: some View {
         hero
-        if let version = model.justUpdated { updatedBanner(version) }
         if let version = model.updateVersion { updateBanner(version) }
         if !model.axOK { banner("Autorise l'accessibilité pour coller le texte", action: model.openAccessibility) }
         if !model.micOK { banner("Autorise le micro pour dicter", action: model.openMicrophone) }
@@ -120,7 +119,17 @@ struct MenuView: View {
                 HStack(spacing: 6) {
                     Circle().fill(statusColor).frame(width: 7, height: 7)
                         .shadow(color: statusColor.opacity(0.8), radius: 3)
-                    Text(statusText).lineLimit(1)
+                    // Juste après une mise à jour, la confirmation prend la place de l'état, sans décaler le panneau
+                    Group {
+                        if let version = model.justUpdated {
+                            Text("Mise à jour \(version) installée ✓").foregroundStyle(Color(Brand.green))
+                        } else {
+                            Text(statusText)
+                        }
+                    }
+                    .lineLimit(1)
+                    .id(model.justUpdated)
+                    .transition(.opacity)
                 }
                 .font(.system(size: 11.5, weight: .medium))
                 .foregroundStyle(.secondary)
@@ -185,18 +194,6 @@ struct MenuView: View {
         .buttonStyle(.plain)
         .disabled(model.installProgress != nil)
         .pointingHand()
-    }
-
-    private func updatedBanner(_ version: String) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: "checkmark.circle.fill")
-            Text("Dictée est passée en \(version)").font(.system(size: 12, weight: .semibold))
-            Spacer()
-        }
-        .foregroundStyle(.white)
-        .padding(.horizontal, 12).frame(height: 36)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color(Brand.green)))
-        .transition(.move(edge: .top).combined(with: .opacity))
     }
 
     private func banner(_ text: String, action: @escaping () -> Void) -> some View {

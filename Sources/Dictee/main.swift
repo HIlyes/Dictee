@@ -710,8 +710,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             pendingJustUpdated = nil
             // La confirmation s'efface d'elle-même au bout de quelques secondes
             if menuModel.justUpdated != nil {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
-                    withAnimation(.easeIn(duration: 0.25)) { self?.menuModel.justUpdated = nil }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                    withAnimation(.easeInOut(duration: 0.4)) { self?.menuModel.justUpdated = nil }
                 }
             }
             menuModel.hoveredDay = nil
