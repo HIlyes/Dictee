@@ -46,6 +46,12 @@ final class MenuModel: ObservableObject {
 
 private let coral = Color(Brand.coral)
 private let violet = Color(Brand.violet)
+/// Violet des textes cliquables : éclairci en mode sombre pour rester bien lisible
+private let linkColor = Color(NSColor(name: nil) { appearance in
+    appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        ? NSColor(srgbRed: 0.72, green: 0.66, blue: 1.00, alpha: 1)
+        : Brand.violet
+})
 private let gradient = LinearGradient(colors: [coral, violet], startPoint: .topLeading, endPoint: .bottomTrailing)
 /// Dictées montrées sur l'accueil ; les autres sont dans la page Historique
 private let homeRows = 3
@@ -467,7 +473,7 @@ private struct LinkButton: View {
                 Image(systemName: "chevron.right").font(.system(size: 8.5, weight: .bold))
             }
             .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(violet)
+            .foregroundStyle(linkColor)
         }
         .buttonStyle(.plain)
         .pointingHand()
@@ -535,7 +541,7 @@ private struct HistoryRow: View {
                     Text(entry.date.map(relative) ?? "").opacity(hover || copied ? 0 : 1)
                     Label(copied ? "Copié" : "Copier", systemImage: copied ? "checkmark" : "doc.on.doc")
                         .labelStyle(.titleAndIcon)
-                        .foregroundStyle(copied ? Color(Brand.green) : violet)
+                        .foregroundStyle(copied ? Color(Brand.green) : linkColor)
                         .opacity(hover || copied ? 1 : 0)
                 }
                 .font(.system(size: 10.5, weight: .medium))
