@@ -179,46 +179,68 @@ enum TextCleanup {
 enum Stats {
     private static let d = UserDefaults.standard
 
-    static var history: [String] { d.stringArray(forKey: "history") ?? [] }
+    /// Assez pour retrouver une dictée perdue, sans garder tout ce qu'on a dit
+    private static let maxHistory = 10
+    static var history: [String] { Array((d.stringArray(forKey: "history") ?? []).prefix(maxHistory)) }
+    /// App où chaque dictée a été collée, dans le même ordre
+    static var historyApps: [String] { d.stringArray(forKey: "historyApps") ?? [] }
     /// Date de chaque dictée de l'historique (secondes depuis 1970), dans le même ordre
     static var historyDates: [Double] { d.array(forKey: "historyDates") as? [Double] ?? [] }
-    static var totalWords: Int { d.integer(forKey: "totalWords") }
-    static var todayWords: Int { d.string(forKey: "todayDate") == today ? d.integer(forKey: "todayWords") : 0 }
-    /// Temps gagné par rapport à une frappe à 40 mots/min, en minutes
-    static var minutesSaved: Int { max(0, Int(Double(totalWords) / 40 - d.double(forKey: "totalSeconds") / 60)) }
+    static var todayWords: Int { dailyWords[today] ?? 0 }
 
     private static func day(_ date: Date) -> String {
         ISO8601DateFormatter.string(from: date, timeZone: .current, formatOptions: .withFullDate)
     }
     private static var today: String { day(Date()) }
 
-    /// Mots dictés par jour (« 2026-10-31 » -> 412)
-    private static var daily: [String: Int] { d.dictionary(forKey: "dailyWords") as? [String: Int] ?? [:] }
+    /// Par jour (« 2026-10-31 » -> valeur) : mots dictés, et secondes passées à parler
+    private static var dailyWords: [String: Int] { d.dictionary(forKey: "dailyWords") as? [String: Int] ?? [:] }
+    private static var dailySeconds: [String: Double] { d.dictionary(forKey: "dailySeconds") as? [String: Double] ?? [:] }
 
-    /// Les 7 derniers jours, du plus ancien à aujourd'hui
-    static var lastWeek: [(date: Date, words: Int)] {
-        var days = daily
-        // Les mots d'aujourd'hui comptés avant l'arrivée du suivi par jour
-        if days[today] == nil, todayWords > 0 { days[today] = todayWords }
-        return (0..<7).reversed().map { offset in
-            let date = Calendar.current.date(byAdding: .day, value: -offset, to: Date())!
-            return (date, days[day(date)] ?? 0)
+    /// Temps gagné par rapport à une frappe à 40 mots/min (1,5 s par mot), en secondes
+    static func saved(words: Int, seconds: Double) -> Double { max(0, Double(words) * 1.5 - seconds) }
+
+    /// La semaine en cours, du lundi au dimanche
+    static var thisWeek: [(date: Date, words: Int, saved: Double)] {
+        let words = dailyWords
+        let seconds = dailySeconds
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.firstWeekday = 2
+        let monday = calendar.dateInterval(of: .weekOfYear, for: Date())?.start ?? Date()
+        return (0..<7).map { offset in
+            let date = calendar.date(byAdding: .day, value: offset, to: monday)!
+            let w = words[day(date)] ?? 0
+            return (date, w, saved(words: w, seconds: seconds[day(date)] ?? 0))
         }
     }
 
-    static func record(_ text: String, seconds: Double) {
+    /// Moyenne de mots des jours dictés (hors aujourd'hui), nil sans historique
+    static var averageWords: Double? {
+        let past = dailyWords.filter { $0.key != today && $0.value > 0 }.map(\.value)
+        return past.isEmpty ? nil : Double(past.reduce(0, +)) / Double(past.count)
+    }
+
+    /// Secondes de calcul par seconde d'audio, apprises au fil des dictées (pour la barre de progression)
+    static var transcribeRatio: Double {
+        get { d.object(forKey: "transcribeRatio") as? Double ?? 0.09 }
+        set { d.set(newValue, forKey: "transcribeRatio") }
+    }
+
+    static func record(_ text: String, seconds: Double, app: String) {
         let words = text.split(whereSeparator: { $0.isWhitespace }).count
-        d.set(Array(([text] + history).prefix(50)), forKey: "history")
-        d.set(Array(([Date().timeIntervalSince1970] + historyDates).prefix(50)), forKey: "historyDates")
-        var days = daily
-        days[today] = todayWords + words
+        d.set(Array(([text] + history).prefix(maxHistory)), forKey: "history")
+        d.set(Array(([Date().timeIntervalSince1970] + historyDates).prefix(maxHistory)), forKey: "historyDates")
+        // Les anciennes dictées n'ont pas d'app : on complète pour garder les listes alignées
+        let apps = historyApps + Array(repeating: "", count: max(0, history.count - 1 - historyApps.count))
+        d.set(Array(([app] + apps).prefix(maxHistory)), forKey: "historyApps")
         // On ne garde qu'un mois
         let cutoff = day(Date().addingTimeInterval(-31 * 86_400))
-        d.set(days.filter { $0.key >= cutoff }, forKey: "dailyWords")
-        d.set(totalWords + words, forKey: "totalWords")
-        d.set(todayWords + words, forKey: "todayWords")
-        d.set(today, forKey: "todayDate")
-        d.set(d.double(forKey: "totalSeconds") + seconds, forKey: "totalSeconds")
+        var w = dailyWords
+        w[today, default: 0] += words
+        d.set(w.filter { $0.key >= cutoff }, forKey: "dailyWords")
+        var sec = dailySeconds
+        sec[today, default: 0] += seconds
+        d.set(sec.filter { $0.key >= cutoff }, forKey: "dailySeconds")
     }
 }
 
@@ -342,6 +364,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuModel.update = { [weak self] in self?.updateClicked() }
         menuModel.openAccessibility = { [weak self] in self?.openAccessibility() }
         menuModel.openMicrophone = { [weak self] in self?.openMicrophone() }
+        menuModel.toggleAppearance = { [weak self] in self?.toggleAppearance() }
+        applyAppearance(UserDefaults.standard.string(forKey: "appearance").map { NSAppearance.Name($0) })
         refresh()
 
         log("Lancement \(Bundle.main.bundlePath)")
@@ -551,6 +575,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSSound(named: "Pop")?.play()
         // Moins de 0,3 s : appui accidentel
         guard samples.count > 16_000 * 3 / 10, let whisper else { state = .ready; return }
+        // Durée estimée d'après la longueur de l'audio : la bulle en tire sa barre de progression
+        // Un peu optimiste (× 0,9) : la barre arrive près de 100 % au moment où le texte tombe
+        overlay.model.estimate = max(0.5, Double(samples.count) / 16_000 * Stats.transcribeRatio * 0.9)
         state = .transcribing
         let options = DecodingOptions(
             task: .transcribe,
@@ -568,7 +595,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let id = transcriptionID
         Task {
             do {
+                let started = Date()
                 let results: [TranscriptionResult] = try await whisper.transcribe(audioArray: samples, decodeOptions: options)
+                if seconds > 2 {
+                    // Moyenne glissante : l'estimation s'ajuste à la vitesse réelle de ce Mac
+                    let ratio = Date().timeIntervalSince(started) / seconds
+                    Stats.transcribeRatio = Stats.transcribeRatio * 0.5 + ratio * 0.5
+                }
                 let raw = results.map(\.text).joined(separator: " ")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 let cleaned = TextCleanup.apply(raw)
@@ -579,7 +612,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     let before = CursorContext.textBeforeCursor()
                     let text = CursorContext.adapt(text, after: before)
                     log("Contexte du curseur : \(before.map { "« …\(String($0.suffix(20)))»" } ?? "illisible")")
-                    if !text.isEmpty { Stats.record(text, seconds: seconds); refreshPanel() }
+                    if !text.isEmpty { Stats.record(text, seconds: seconds, app: NSWorkspace.shared.frontmostApplication?.localizedName ?? ""); refreshPanel() }
                     if !text.isEmpty && !Paster.paste(text) {
                         state = .error("Texte copié : fais ⌘V (accessibilité à autoriser)")
                         NSSound(named: "Funk")?.play()
@@ -628,12 +661,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Bascule clair <-> sombre (au départ, l'app suit le thème du Mac)
+    private func toggleAppearance() {
+        applyAppearance(menuModel.isDark ? .aqua : .darkAqua)
+    }
+
+    private func applyAppearance(_ name: NSAppearance.Name?) {
+        NSApp.appearance = name.flatMap(NSAppearance.init(named:))
+        popover.appearance = NSApp.appearance
+        menuModel.isDark = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        UserDefaults.standard.set(name?.rawValue, forKey: "appearance")
+    }
+
     @objc private func togglePopover() {
         guard let button = statusItem.button else { return }
         if popover.isShown {
             popover.performClose(nil)
         } else {
             menuModel.page = .home
+            menuModel.hoveredDay = nil
+            menuModel.hoveredRow = nil
+            // Le thème du Mac a pu changer depuis la dernière ouverture
+            menuModel.isDark = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
             refresh()
             refreshPanel()
             NSApp.activate(ignoringOtherApps: true)
@@ -654,13 +703,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let m = menuModel
         m.launchAtLogin = SMAppService.mainApp.status == .enabled
         let dates = Stats.historyDates
+        let apps = Stats.historyApps
         m.history = Stats.history.enumerated().map { i, text in
-            MenuModel.Entry(text: text, date: i < dates.count ? Date(timeIntervalSince1970: dates[i]) : nil)
+            MenuModel.Entry(text: text, date: i < dates.count ? Date(timeIntervalSince1970: dates[i]) : nil,
+                            app: i < apps.count ? apps[i] : "")
         }
+        m.averageWords = Stats.averageWords
         m.todayWords = Stats.todayWords
-        m.totalWords = Stats.totalWords
-        m.minutesSaved = Stats.minutesSaved
-        m.week = Stats.lastWeek.map { MenuModel.Day(date: $0.date, words: $0.words) }
+        m.week = Stats.thisWeek.map { MenuModel.Day(date: $0.date, words: $0.words, saved: $0.saved) }
     }
 
     /// État courant : icône de la barre de menu et en-tête du panneau
@@ -778,15 +828,16 @@ if CommandLine.arguments.contains("--preview") {
         menu.hotkey = .fn
         menu.version = "0.7"
         menu.todayWords = 412
-        menu.totalWords = 5_280
-        menu.minutesSaved = 96
+        menu.averageWords = 335
+        if CommandLine.arguments.contains("--hover") { menu.hoveredRow = 0; menu.hoveredDay = 1 }
         menu.history = [
-            .init(text: "Tu peux me dire pourquoi la bulle n'apparaît pas en plein écran ?", date: Date().addingTimeInterval(-40)),
-            .init(text: "Ok, je regarde ça demain matin et je te redis.", date: Date().addingTimeInterval(-60 * 14)),
-            .init(text: "Merci pour le retour !", date: Date().addingTimeInterval(-3600 * 3)),
+            .init(text: "Tu peux me dire pourquoi la bulle n'apparaît pas en plein écran ?", date: Date().addingTimeInterval(-40), app: "Claude"),
+            .init(text: "Ok, je regarde ça demain matin et je te redis.", date: Date().addingTimeInterval(-60 * 14), app: "Slack"),
+            .init(text: "Merci pour le retour !", date: Date().addingTimeInterval(-3600 * 3), app: "Google Chrome"),
         ]
-        menu.week = [120, 340, 0, 280, 510, 190, 412].enumerated().map {
-            MenuModel.Day(date: Date().addingTimeInterval(Double($0.offset - 6) * 86_400), words: $0.element)
+        menu.week = [120, 340, 0, 280, 412, 0, 0].enumerated().map {
+            MenuModel.Day(date: Date().addingTimeInterval(Double($0.offset - 4) * 86_400), words: $0.element,
+                          saved: Stats.saved(words: $0.element, seconds: Double($0.element) * 0.4))
         }
         for (page, dark, suffix) in [(MenuModel.Page.home, false, "light"), (.home, true, "dark"),
                                      (.settings, false, "settings"), (.history, true, "history")] {

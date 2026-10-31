@@ -6,8 +6,8 @@ import SwiftUI
 final class MenuModel: ObservableObject {
     enum Status: Equatable { case loading(String), ready, recording(handsFree: Bool), transcribing, error(String) }
     enum Page { case home, history, settings }
-    struct Entry { let text: String; let date: Date? }
-    struct Day { let date: Date; let words: Int }
+    struct Entry { let text: String; let date: Date?; let app: String }
+    struct Day { let date: Date; let words: Int; let saved: Double }
 
     @Published var page: Page = .home
     @Published var status: Status = .loading("Démarrage…")
@@ -18,9 +18,13 @@ final class MenuModel: ObservableObject {
     @Published var micOK = true
     @Published var history: [Entry] = []
     @Published var week: [Day] = []
+    /// Jour survolé dans le graphique (index), son détail s'affiche sous le graphique
+    @Published var hoveredDay: Int?
+    /// Le panneau est-il affiché en sombre (pour l'icône de bascule)
+    @Published var isDark = false
     @Published var todayWords = 0
-    @Published var totalWords = 0
-    @Published var minutesSaved = 0
+    /// Moyenne de mots des jours précédents, nil sans historique
+    @Published var averageWords: Double?
     @Published var version = ""
     /// Version disponible sur GitHub, nil si l'app est à jour
     @Published var updateVersion: String?
@@ -38,6 +42,7 @@ final class MenuModel: ObservableObject {
     var update: () -> Void = {}
     var openAccessibility: () -> Void = {}
     var openMicrophone: () -> Void = {}
+    var toggleAppearance: () -> Void = {}
 
     var isActive: Bool {
         switch status { case .recording, .transcribing: return true; default: return false }
@@ -46,12 +51,17 @@ final class MenuModel: ObservableObject {
 
 private let coral = Color(Brand.coral)
 private let violet = Color(Brand.violet)
+/// Couleur qui change selon le thème clair / sombre
+private func themed(light: NSColor, dark: NSColor) -> Color {
+    Color(NSColor(name: nil) { $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light })
+}
+/// Fond du panneau : opaque, pour que les cartes ressortent quel que soit le fond d'écran
+private let panelBackground = themed(light: NSColor(white: 0.94, alpha: 1), dark: NSColor(white: 0.12, alpha: 1))
+/// Fond des pastilles posées par-dessus le texte
+private let pillBackground = themed(light: .white, dark: NSColor(white: 0.22, alpha: 1))
+
 /// Violet des textes cliquables : éclairci en mode sombre pour rester bien lisible
-private let linkColor = Color(NSColor(name: nil) { appearance in
-    appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        ? NSColor(srgbRed: 0.72, green: 0.66, blue: 1.00, alpha: 1)
-        : Brand.violet
-})
+private let linkColor = themed(light: Brand.violet, dark: NSColor(srgbRed: 0.72, green: 0.66, blue: 1.00, alpha: 1))
 private let gradient = LinearGradient(colors: [coral, violet], startPoint: .topLeading, endPoint: .bottomTrailing)
 /// Dictées montrées sur l'accueil ; les autres sont dans la page Historique
 private let homeRows = 3
@@ -69,6 +79,7 @@ struct MenuView: View {
         }
         .padding(14)
         .frame(width: 330)
+        .background(panelBackground.ignoresSafeArea())
     }
 
     // MARK: - Accueil
@@ -110,7 +121,12 @@ struct MenuView: View {
                 .foregroundStyle(.secondary)
             }
             Spacer(minLength: 6)
-            IconButton(symbol: "gearshape.fill", help: "Réglages") { model.page = .settings }
+            HStack(spacing: 4) {
+                IconButton(symbol: model.isDark ? "sun.max.fill" : "moon.fill",
+                           help: model.isDark ? "Passer en mode clair" : "Passer en mode sombre",
+                           action: model.toggleAppearance)
+                IconButton(symbol: "gearshape.fill", help: "Réglages") { model.page = .settings }
+            }
         }
         .padding(12)
         .background(Aurora())
@@ -173,20 +189,39 @@ struct MenuView: View {
     // MARK: Statistiques + semaine
 
     private var statsCard: some View {
-        HStack(alignment: .bottom, spacing: 14) {
-            Metric(value: model.todayWords.formatted(), label: "mots aujourd'hui")
-            Metric(value: saved, label: "gagnées")
-            Spacer(minLength: 0)
-            WeekChart(days: model.week)
+        let today = model.week.first { Calendar.current.isDateInToday($0.date) }
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 6) {
+                StatTile(value: model.todayWords.formatted(), label: "mots aujourd'hui")
+                StatTile(value: duration(today?.saved ?? 0), label: "gagnées aujourd'hui")
+            }
+            WeekChart(model: model)
+            Group {
+                if let i = model.hoveredDay, i < model.week.count {
+                    let day = model.week[i]
+                    Text("\(WeekChart.fullNames[i]) : \(day.words.formatted()) mots · \(duration(day.saved)) gagnées")
+                        .foregroundStyle(.primary)
+                } else if let trend {
+                    Text(trend.text).foregroundStyle(trend.color)
+                } else {
+                    Text("Survole un jour pour le détail").foregroundStyle(.secondary)
+                }
+            }
+            .font(.system(size: 10.5, weight: .semibold))
+            .lineLimit(1)
+            .padding(.horizontal, 6)
+            .animation(.easeOut(duration: 0.12), value: model.hoveredDay)
         }
-        .padding(12)
+        .padding(10)
         .background(Card())
-        .help("\(model.totalWords.formatted()) mots dictés au total")
     }
 
-    private var saved: String {
-        let m = model.minutesSaved
-        return m >= 60 ? "\(m / 60) h \(String(format: "%02d", m % 60))" : "\(m) min"
+    /// « ↑ 23 % vs ta moyenne » : aujourd'hui comparé aux jours précédents
+    private var trend: (text: String, color: Color)? {
+        guard let avg = model.averageWords, avg > 0, model.todayWords > 0 else { return nil }
+        let pct = Int(((Double(model.todayWords) / avg - 1) * 100).rounded())
+        if pct == 0 { return ("= ta moyenne", .secondary) }
+        return pct > 0 ? ("↑ \(pct) % vs ta moyenne", Color(nsColor: .systemGreen)) : ("↓ \(-pct) % vs ta moyenne", .secondary)
     }
 
     // MARK: Les trois gestes
@@ -401,40 +436,87 @@ private struct LiveWave: View {
     }
 }
 
+/// Durée lisible : « 45 s », « 12 min », « 1 h 05 »
+private func duration(_ seconds: Double) -> String {
+    let s = Int(seconds.rounded())
+    if s < 60 { return "\(s) s" }
+    let m = s / 60
+    return m >= 60 ? "\(m / 60) h \(String(format: "%02d", m % 60))" : "\(m) min"
+}
+
+/// La semaine du lundi au dimanche : mots dictés ou temps gagné, aujourd'hui en dégradé
 private struct WeekChart: View {
-    let days: [MenuModel.Day]
-    private let initials = ["D", "L", "M", "M", "J", "V", "S"]
+    @ObservedObject var model: MenuModel
+    private let names = ["Lu", "Ma", "Me", "Je", "Ve", "Sa", "Di"]
+    static let fullNames = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
 
     var body: some View {
-        let top = max(days.map(\.words).max() ?? 0, 1)
-        HStack(alignment: .bottom, spacing: 5) {
+        let days = model.week
+        let top = CGFloat(max(days.map(\.words).max() ?? 0, 1))
+        HStack(alignment: .bottom, spacing: 6) {
             ForEach(Array(days.enumerated()), id: \.offset) { i, day in
-                let isToday = i == days.count - 1
-                VStack(spacing: 4) {
+                let isToday = Calendar.current.isDateInToday(day.date)
+                let isFuture = !isToday && day.date > Date()
+                let hovered = model.hoveredDay == i
+                VStack(spacing: 5) {
                     Capsule()
-                        .fill(isToday ? AnyShapeStyle(gradient) : AnyShapeStyle(Color.primary.opacity(0.15)))
-                        .frame(width: 7, height: max(3, 30 * CGFloat(day.words) / CGFloat(top)))
-                    Text(initials[Calendar.current.component(.weekday, from: day.date) - 1])
-                        .font(.system(size: 8.5, weight: isToday ? .bold : .medium))
-                        .foregroundStyle(isToday ? .primary : .secondary)
+                        .fill(isToday ? AnyShapeStyle(gradient)
+                              : AnyShapeStyle(Color.primary.opacity(isFuture ? 0.06 : hovered ? 0.32 : 0.16)))
+                        .frame(height: max(4, 44 * CGFloat(day.words) / top))
+                        .frame(maxWidth: 14)
+                        .scaleEffect(x: hovered ? 1.15 : 1, anchor: .bottom)
+                    Text(names[i])
+                        .font(.system(size: 9.5, weight: isToday || hovered ? .bold : .medium))
+                        .foregroundStyle(isToday || hovered ? Color.primary
+                                         : isFuture ? Color.secondary.opacity(0.5) : Color.secondary)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .padding(.vertical, 4)
+                // Halo de la marque derrière le jour survolé
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(LinearGradient(colors: [coral.opacity(0.18), violet.opacity(0.18)],
+                                             startPoint: .top, endPoint: .bottom))
+                        .shadow(color: violet.opacity(0.35), radius: 6)
+                        .opacity(hovered ? 1 : 0)
+                )
             }
         }
-        .help("Mots dictés ces 7 derniers jours")
+        .frame(height: 72, alignment: .bottom)
+        // Le jour survolé vient de la position de la souris : impossible qu'il reste bloqué
+        .overlay(GeometryReader { geo in
+            Color.clear
+                .contentShape(Rectangle())
+                .onContinuousHover { phase in
+                    var day: Int?
+                    if case .active(let point) = phase {
+                        let i = min(6, max(0, Int(point.x / (geo.size.width / 7))))
+                        let isFuture = i < days.count && !Calendar.current.isDateInToday(days[i].date) && days[i].date > Date()
+                        day = isFuture ? nil : i
+                    }
+                    if model.hoveredDay != day { model.hoveredDay = day }
+                }
+        })
+        .padding(.horizontal, 4)
+        .animation(.easeOut(duration: 0.15), value: model.hoveredDay)
     }
 }
 
-private struct Metric: View {
+/// Un chiffre du jour
+private struct StatTile: View {
     let value: String
     let label: String
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 1) {
             Text(value)
-                .font(.system(size: 22, weight: .bold, design: .rounded).monospacedDigit())
+                .font(.system(size: 20, weight: .bold, design: .rounded).monospacedDigit())
                 .foregroundStyle(gradient)
-                .lineLimit(1).fixedSize()
-            Text(label).font(.system(size: 10.5, weight: .medium)).foregroundStyle(.secondary).fixedSize()
+                .lineLimit(1).minimumScaleFactor(0.7)
+            Text(label).font(.system(size: 10.5, weight: .medium)).foregroundStyle(.secondary).lineLimit(1)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 10).padding(.vertical, 7)
+        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color.primary.opacity(0.05)))
     }
 }
 
@@ -530,23 +612,32 @@ private struct HistoryRow: View {
                 if model.copiedRow == index { model.copiedRow = nil }
             }
         } label: {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(entry.text)
                     .font(.system(size: 12.5))
                     .foregroundStyle(.primary)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                ZStack(alignment: .trailing) {
-                    Text(entry.date.map(relative) ?? "").opacity(hover || copied ? 0 : 1)
-                    Label(copied ? "Copié" : "Copier", systemImage: copied ? "checkmark" : "doc.on.doc")
+                Text(meta)
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            // Pastille posée par-dessus, à droite : la ligne ne change jamais de hauteur
+            .overlay(alignment: .trailing) {
+                if hover || copied {
+                    Label(copied ? "Copié" : "Copier",
+                          systemImage: copied ? "checkmark" : "doc.on.doc")
                         .labelStyle(.titleAndIcon)
+                        .font(.system(size: 10.5, weight: .semibold))
                         .foregroundStyle(copied ? Color(Brand.green) : linkColor)
-                        .opacity(hover || copied ? 1 : 0)
+                        .padding(.horizontal, 8).padding(.vertical, 4)
+                        .background(Capsule().fill(pillBackground))
+                        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.1)))
+                        .shadow(color: .black.opacity(0.08), radius: 3, y: 1)
+                        .transition(.opacity)
                 }
-                .font(.system(size: 10.5, weight: .medium))
-                .foregroundStyle(.secondary)
-                .frame(minWidth: 58, alignment: .trailing)
             }
             .padding(.horizontal, 10).padding(.vertical, 9)
             .background(RoundedRectangle(cornerRadius: 9, style: .continuous)
@@ -554,10 +645,18 @@ private struct HistoryRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .modifier(ReturnKey(enabled: showsReturn))
         .onHover { inside in
             if inside { model.hoveredRow = index } else if model.hoveredRow == index { model.hoveredRow = nil }
         }
         .pointingHand()
+    }
+
+    /// La dictée la plus récente, sur l'accueil, se copie aussi avec Entrée
+    private var showsReturn: Bool { index == 0 && model.page == .home }
+
+    private var meta: String {
+        [entry.app, entry.date.map(relative) ?? ""].filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
     private func relative(_ date: Date) -> String {
@@ -566,6 +665,13 @@ private struct HistoryRow: View {
         if s < 3600 { return "il y a \(s / 60) min" }
         if s < 86_400 { return "il y a \(s / 3600) h" }
         return s < 172_800 ? "hier" : "il y a \(s / 86_400) j"
+    }
+}
+
+private struct ReturnKey: ViewModifier {
+    let enabled: Bool
+    func body(content: Content) -> some View {
+        if enabled { content.keyboardShortcut(.defaultAction) } else { content }
     }
 }
 

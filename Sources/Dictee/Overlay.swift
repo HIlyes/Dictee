@@ -17,6 +17,15 @@ final class OverlayModel: ObservableObject {
     /// Mains libres : la dictée continue sans tenir la touche
     @Published var locked = false
     @Published var start = Date()
+    /// Durée de transcription estimée (s) et début de la transcription
+    var estimate: Double = 1
+    var transcribeStart = Date()
+
+    /// Avance de 0 à 1 : linéaire jusqu'à 90 %, puis ralentit sans jamais finir avant le vrai résultat
+    func progress(at date: Date) -> Double {
+        let p = date.timeIntervalSince(transcribeStart) / estimate
+        return p < 0.9 ? p : 0.9 + 0.09 * (1 - exp(-(p - 0.9) * 3))
+    }
 
     func push(_ rms: Float) {
         // La voix tourne autour de 0,01-0,1 en RMS : on étale pour que l'onde bouge bien
@@ -69,10 +78,26 @@ struct OverlayView: View {
                 }
             case .transcribing:
                 Circle().fill(accent).frame(width: 8, height: 8).shadow(color: accent, radius: 4)
-                Text("Transcription…")
+                Text("Transcription")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.white.opacity(0.9))
-                ProgressView().controlSize(.small).tint(.white)
+                TimelineView(.animation(minimumInterval: 1 / 20)) { context in
+                    let p = model.progress(at: context.date)
+                    HStack(spacing: 8) {
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(.white.opacity(0.15))
+                            Capsule()
+                                .fill(LinearGradient(colors: [Color(Brand.coral), Color(Brand.violet)],
+                                                     startPoint: .leading, endPoint: .trailing))
+                                .frame(width: 110 * p)
+                        }
+                        .frame(width: 110, height: 5)
+                        Text("\(Int(p * 100)) %")
+                            .font(.system(size: 11, weight: .medium).monospacedDigit())
+                            .foregroundStyle(.white.opacity(0.7))
+                            .frame(width: 32, alignment: .trailing)
+                    }
+                }
             case .done, .cancelled:
                 Image(systemName: model.mode == .done ? "checkmark" : "xmark")
                     .font(.system(size: 12, weight: .bold))
@@ -120,6 +145,7 @@ final class OverlayPanel {
 
     func show(_ mode: OverlayModel.Mode) {
         hideToken += 1
+        if mode == .transcribing { model.transcribeStart = Date() }
         if mode == .listening {
             model.levels = model.levels.map { _ in 0 }
             model.locked = false
