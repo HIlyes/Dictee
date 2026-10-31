@@ -34,7 +34,7 @@ Maintiens une touche, parle, relâche : le texte s'écrit là où se trouve ton 
 - **Échap** annule la dictée en cours : rien n'est collé.
 - Les « euh », « hum » et mots répétés (« je je ») sont retirés automatiquement.
 - Clique sur l'icône 🎤 de la barre de menu pour ouvrir le panneau :
-  - tes **statistiques** : mots dictés aujourd'hui, au total, et temps gagné ;
+  - tes **statistiques** : mots dictés et temps gagné aujourd'hui, graphique de la semaine ;
   - **Historique** : tes 10 dernières dictées, un clic recopie le texte ;
   - **Raccourci** : choisis ta touche (Option, Commande droite, Contrôle, Fn…) ;
   - **Langue** : français, ou détection automatique pour dicter dans d'autres langues ;
@@ -45,11 +45,11 @@ Maintiens une touche, parle, relâche : le texte s'écrit là où se trouve ton 
 ## Mises à jour
 
 Dictée vérifie une fois par jour s'il existe une nouvelle version sur cette page GitHub. Seul le numéro de la dernière version est demandé : rien d'autre n'est envoyé.
-Quand une mise à jour est disponible, le menu 🎤 affiche **« ⬆️ Mise à jour disponible »**. Clique dessus pour ouvrir la page de téléchargement, puis :
+Quand une mise à jour est disponible, une pastille apparaît sur l'icône 🎤. Ouvre le panneau et clique sur **Installer** : Dictée télécharge la nouvelle version, vérifie qu'elle est bien signée par le même auteur, la met à la place de l'ancienne et se relance toute seule. Tes réglages, ton historique et l'autorisation d'accessibilité sont conservés.
 
-1. quitte Dictée (menu 🎤 → Quitter) ;
-2. remplace l'ancienne `Dictee.app` dans Applications par celle du nouveau zip ;
-3. relance-la. Si la dictée n'écrit plus rien, réactive Dictee dans **Accessibilité** (voir Dépannage).
+Si l'installation automatique échoue (par exemple si l'app est lancée depuis Téléchargements), la page de téléchargement s'ouvre : quitte Dictée, remplace l'ancienne `Dictee.app` dans Applications par celle du nouveau zip, puis relance-la.
+
+> Les versions antérieures à 0.7.4 n'ont pas l'installation automatique : il faut faire cette mise à jour-là à la main.
 
 ## Dépannage
 

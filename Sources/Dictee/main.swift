@@ -333,6 +333,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var availableUpdate: Updater.Release?
     /// Vrai quand l'utilisateur a cliqué : le panneau affiche alors le résultat
     private var manualUpdateCheck = false
+    /// Version installée par la mise à jour automatique, annoncée à la prochaine ouverture du panneau
+    private var pendingJustUpdated: String?
     private var recordStart = Date()
     private let overlay = OverlayPanel()
     private var whisper: WhisperKit?
@@ -386,7 +388,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.menuModel.checkFailed = false
                 guard manual else { return }
                 if let release {
-                    NSWorkspace.shared.open(release.page)
+                    self.install(release)
                 } else {
                     self.menuModel.confirmedUpToDate = true
                     DispatchQueue.main.asyncAfter(deadline: .now() + 4) { self.menuModel.confirmedUpToDate = false }
@@ -400,6 +402,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.manualUpdateCheck = false
         }
         updater.start()
+        // Juste après une mise à jour automatique : on ouvre le panneau pour la confirmer
+        if UserDefaults.standard.string(forKey: "justUpdated") == updater.currentVersion {
+            UserDefaults.standard.removeObject(forKey: "justUpdated")
+            pendingJustUpdated = updater.currentVersion
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.togglePopover() }
+        }
         // Au réveil : on repose le raccourci et on remet l'app dans un état propre
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
@@ -653,12 +661,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func updateClicked() {
         if let release = availableUpdate {
-            NSWorkspace.shared.open(release.page)
+            install(release)
         } else {
             menuModel.checking = true
             manualUpdateCheck = true
             updater.check()
         }
+    }
+
+    /// Installe la mise à jour puis relance l'app ; en cas d'échec, ouvre la page de téléchargement
+    private func install(_ release: Updater.Release) {
+        guard menuModel.installProgress == nil else { return }
+        menuModel.installProgress = 0
+        updater.install(release, progress: { [weak self] p in
+            self?.menuModel.installProgress = p
+        }, completion: { [weak self] failure in
+            guard let self else { return }
+            if failure == nil {
+                self.menuModel.installProgress = 1
+                UserDefaults.standard.set(release.version, forKey: "justUpdated")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { self.updater.relaunch() }
+            } else {
+                self.menuModel.installProgress = nil
+                NSWorkspace.shared.open(release.page)
+            }
+        })
     }
 
     /// Bascule clair <-> sombre (au départ, l'app suit le thème du Mac)
@@ -679,6 +706,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popover.performClose(nil)
         } else {
             menuModel.page = .home
+            menuModel.justUpdated = pendingJustUpdated
+            pendingJustUpdated = nil
+            // La confirmation s'efface d'elle-même au bout de quelques secondes
+            if menuModel.justUpdated != nil {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+                    withAnimation(.easeIn(duration: 0.25)) { self?.menuModel.justUpdated = nil }
+                }
+            }
             menuModel.hoveredDay = nil
             menuModel.hoveredRow = nil
             // Le thème du Mac a pu changer depuis la dernière ouverture

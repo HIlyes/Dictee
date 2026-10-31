@@ -29,6 +29,10 @@ final class MenuModel: ObservableObject {
     /// Version disponible sur GitHub, nil si l'app est à jour
     @Published var updateVersion: String?
     @Published var checking = false
+    /// Avancement du téléchargement de la mise à jour, nil hors installation
+    @Published var installProgress: Double?
+    /// Version tout juste installée, affichée à l'ouverture qui suit le redémarrage
+    @Published var justUpdated: String?
     @Published var checkFailed = false
     /// Vrai quelques secondes après une vérification manuelle réussie
     @Published var confirmedUpToDate = false
@@ -86,6 +90,7 @@ struct MenuView: View {
 
     @ViewBuilder private var home: some View {
         hero
+        if let version = model.justUpdated { updatedBanner(version) }
         if let version = model.updateVersion { updateBanner(version) }
         if !model.axOK { banner("Autorise l'accessibilité pour coller le texte", action: model.openAccessibility) }
         if !model.micOK { banner("Autorise le micro pour dicter", action: model.openMicrophone) }
@@ -155,11 +160,22 @@ struct MenuView: View {
         Button(action: model.update) {
             HStack(spacing: 8) {
                 Image(systemName: "sparkles")
-                Text("Dictée \(version) est disponible").font(.system(size: 12, weight: .semibold))
-                Spacer()
-                Text("Télécharger").font(.system(size: 11, weight: .semibold))
-                    .padding(.horizontal, 8).padding(.vertical, 3)
-                    .background(Capsule().fill(.white.opacity(0.25)))
+                if let p = model.installProgress {
+                    Text(p < 1 ? "Téléchargement de la \(version)…" : "Redémarrage…")
+                        .font(.system(size: 12, weight: .semibold))
+                    Spacer()
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(.white.opacity(0.25))
+                        Capsule().fill(.white).frame(width: 70 * p)
+                    }
+                    .frame(width: 70, height: 4)
+                } else {
+                    Text("Dictée \(version) est disponible").font(.system(size: 12, weight: .semibold))
+                    Spacer()
+                    Text("Installer").font(.system(size: 11, weight: .semibold))
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(Capsule().fill(.white.opacity(0.25)))
+                }
             }
             .foregroundStyle(.white)
             .padding(.horizontal, 12).frame(height: 36)
@@ -167,7 +183,20 @@ struct MenuView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(model.installProgress != nil)
         .pointingHand()
+    }
+
+    private func updatedBanner(_ version: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "checkmark.circle.fill")
+            Text("Dictée est passée en \(version)").font(.system(size: 12, weight: .semibold))
+            Spacer()
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 12).frame(height: 36)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color(Brand.green)))
+        .transition(.move(edge: .top).combined(with: .opacity))
     }
 
     private func banner(_ text: String, action: @escaping () -> Void) -> some View {
@@ -346,7 +375,8 @@ struct MenuView: View {
                 : model.confirmedUpToDate ? "✓ C'est bon, tu es à jour"
                 : model.checkFailed ? "Vérification impossible (internet ?)"
                 : model.updateVersion.map { "La version \($0) est disponible" } ?? "Tu as la dernière version") {
-                Button(model.updateVersion != nil ? "Télécharger" : "Vérifier", action: model.update)
+                Button(model.updateVersion != nil ? "Installer" : "Vérifier", action: model.update)
+                    .disabled(model.installProgress != nil)
             }
         }
         .controlSize(.small)
